@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String              @id @default(cuid())
+  email     String              @unique
+  name      String?
+  createdAt DateTime            @default(now())
+  sessions  AssessmentSession[]
+
+  @@index([email])
+}
+
+model AssessmentSession {
+  id            String               @id @default(cuid())
+  userId        String
+  subject       String
+  mode          AssessmentMode       @default(BALANCED)
+  targetCount   Int                  @default(20)
+  askedCount    Int                  @default(0)
+  status        AssessmentStatus     @default(BLUEPRINT_PENDING)
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  completedAt   DateTime?
+  lastAiCallAt  DateTime?
+  blueprint     AssessmentBlueprint?
+  result        AssessmentResult?
+  user          User                 @relation(fields: [userId], references: [id])
+  questions     GeneratedQuestion[]
+  interventions Intervention[]
+  estimates     SkillEstimate[]
+  observations  SkillObservation[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model AssessmentBlueprint {
+  id        String            @id @default(cuid())
+  sessionId String            @unique
+  subject   String
+  goal      String
+  raw       Json
+  createdAt DateTime          @default(now())
+  session   AssessmentSession @relation(fields: [sessionId], references: [id])
+}
+
+model GeneratedQuestion {
+  id            String            @id @default(cuid())
+  sessionId     String
+  sequence      Int
+  conceptId     String
+  conceptName   String
+  type          QuestionType
+  purpose       QuestionPurpose   @default(BASELINE)
+  difficulty    Float
+  prompt        String
+  options       Json?
+  correctAnswer String
+  explanation   String
+  fingerprint   String
+  rationale     String?
+  reachedAt     DateTime          @default(now())
+  evaluation    AIEvaluation?
+  answer        Answer?
+  session       AssessmentSession @relation(fields: [sessionId], references: [id])
+  intervention  Intervention?
+
+  @@unique([sessionId, fingerprint])
+  @@index([sessionId, sequence])
+}
+
+model Answer {
+  id          String            @id @default(cuid())
+  questionId  String            @unique
+  rawAnswer   String
+  confidence  Int?
+  timeTakenMs Int?
+  submittedAt DateTime          @default(now())
+  question    GeneratedQuestion @relation(fields: [questionId], references: [id])
+}
+
+model AIEvaluation {
+  id                String            @id @default(cuid())
+  questionId        String            @unique
+  status            EvaluationStatus
+  correctness       Float
+  confidence        Float
+  errorType         ErrorType         @default(NONE)
+  misconception     String?
+  understood        Json
+  missing           Json
+  recommendedAction String
+  modelUsed         String
+  createdAt         DateTime          @default(now())
+  question          GeneratedQuestion @relation(fields: [questionId], references: [id])
+}
+
+model SkillObservation {
+  id           String            @id @default(cuid())
+  sessionId    String
+  conceptId    String
+  conceptName  String
+  evidenceType String
+  correctness  Float
+  difficulty   Float
+  createdAt    DateTime          @default(now())
+  session      AssessmentSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId, conceptId])
+}
+
+model SkillEstimate {
+  id                 String            @id @default(cuid())
+  sessionId          String
+  conceptId          String
+  conceptName        String
+  proficiency        Float
+  evidenceConfidence Float
+  evidenceCount      Int               @default(0)
+  state              SkillState        @default(UNCERTAIN)
+  difficultyCeiling  Float             @default(0)
+  transferVerified   Boolean           @default(false)
+  updatedAt          DateTime          @updatedAt
+  session            AssessmentSession @relation(fields: [sessionId], references: [id])
+
+  @@unique([sessionId, conceptId])
+  @@index([sessionId])
+}
+
+model Intervention {
+  id          String             @id @default(cuid())
+  sessionId   String
+  questionId  String?            @unique
+  conceptId   String
+  conceptName String
+  title       String
+  explanation String
+  createdAt   DateTime           @default(now())
+  question    GeneratedQuestion? @relation(fields: [questionId], references: [id])
+  session     AssessmentSession  @relation(fields: [sessionId], references: [id])
+}
+
+model AssessmentResult {
+  id                          String            @id @default(cuid())
+  sessionId                   String            @unique
+  overallProficiency          Float
+  overallConfidence           Float
+  strongAreas                 Json
+  developingAreas             Json
+  weakAreas                   Json
+  uncertainAreas              Json
+  misconceptions              Json
+  difficultyCeiling           Float
+  transferPerformance         Float
+  improvementDuringAssessment Float
+  recommendedNextAreas        Json
+  remainingUncertainties      Json
+  summary                     String
+  createdAt                   DateTime          @default(now())
+  session                     AssessmentSession @relation(fields: [sessionId], references: [id])
+}
+
+enum AssessmentStatus {
+  BLUEPRINT_PENDING
+  IN_PROGRESS
+  GENERATING_QUESTION
+  AWAITING_ANSWER
+  COMPLETED
+  ABANDONED
+  FAILED
+}
+
+enum AssessmentMode {
+  BALANCED
+  DEEP
+  PRACTICAL
+  CONCEPTUAL
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+  SHORT_ANSWER
+  CODE_OUTPUT
+  CODE_WRITING
+  DEBUGGING
+  CONCEPTUAL_EXPLANATION
+  SCENARIO
+  PRACTICAL_PROBLEM
+}
+
+enum QuestionPurpose {
+  BASELINE
+  SAME_CONCEPT_EASIER
+  SAME_CONCEPT_DIFFERENT_FORM
+  SAME_CONCEPT_HARDER
+  PREREQUISITE_TEST
+  REMEDIAL_TEST
+  TRANSFER_TEST
+  RELATED_CONCEPT
+  NEW_CONCEPT
+  ADVANCED_CONCEPT
+}
+
+enum EvaluationStatus {
+  CORRECT
+  INCORRECT
+  PARTIALLY_CORRECT
+  UNCERTAIN
+}
+
+enum ErrorType {
+  NONE
+  CONCEPTUAL_GAP
+  SYNTAX_ERROR
+  LOGIC_ERROR
+  TYPE_ERROR
+  GUESS
+  UNKNOWN
+}
+
+enum SkillState {
+  STRONG
+  DEVELOPING
+  WEAK
+  UNCERTAIN
+}
