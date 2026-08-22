@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { prisma, withRetry } from "@/lib/db/prisma";
 import { getOrCreateUserId } from "@/lib/auth";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const userId = await getOrCreateUserId();

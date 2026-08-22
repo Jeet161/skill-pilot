@@ -1,49 +1,29 @@
 import "server-only";
-import { cookies } from "next/headers";
-import { prisma, withRetry } from "@/lib/db/prisma";
-
-const COOKIE_NAME = "skillpilot_uid";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "@/lib/auth-options";
 
 /**
- * SkillPilot's focus is the adaptive assessment engine, not auth
- * plumbing. This module provisions a lightweight per-browser identity
- * via an httpOnly cookie so that every assessment session has a real
- * owning user (required for the ownership checks in the orchestrator),
- * without pulling in a full auth provider.
+ * Returns the authenticated user's ID from the current Next.js server context.
+ * Throws a 401-style error if the user is not signed in.
  *
- * Swap this for NextAuth / Clerk / your identity provider in production —
- * every other module only depends on a `userId: string`, so this is a
- * one-file change.
+ * Drop-in replacement for the old guest-cookie getOrCreateUserId() — every
+ * API route that called that function continues to work because the function
+ * signature is identical (returns Promise<string>).
  */
 export async function getOrCreateUserId(): Promise<string> {
-  const store = cookies();
-  const existing = store.get(COOKIE_NAME)?.value;
+  const session = await getServerSession(authOptions);
 
-  if (existing) {
-    // withRetry handles Neon free-tier cold start (wakes DB if suspended)
-    const user = await withRetry(() =>
-      prisma.user.findUnique({ where: { id: existing } })
-    );
-    if (user) return user.id;
+  if (!session?.user?.id) {
+    throw new Error("UNAUTHORIZED");
   }
 
-  const user = await withRetry(() =>
-    prisma.user.create({
-      data: { email: `guest-${cryptoRandomId()}@skillpilot.local` },
-    })
-  );
-
-  store.set(COOKIE_NAME, user.id, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 365,
-  });
-
-  return user.id;
+  return session.user.id;
 }
 
-function cryptoRandomId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+/**
+ * Returns the full session object (or null if unauthenticated).
+ * Useful in Server Components that need name/email/image too.
+ */
+export async function getSession() {
+  return getServerSession(authOptions);
 }

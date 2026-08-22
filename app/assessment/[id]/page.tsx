@@ -165,7 +165,7 @@ export default function AssessmentPage({ params }: { params: { id: string } }) {
 
   async function proceedToNext() {
     if (!pendingNextQuestion) {
-      router.push("/subjects");
+      router.push("/dashboard");
       return;
     }
     
@@ -296,7 +296,7 @@ export default function AssessmentPage({ params }: { params: { id: string } }) {
                   <h3 className="text-lg font-semibold text-white">{intervention.title}</h3>
                   <p className="mt-2 max-w-md text-sm leading-relaxed text-muted">{intervention.explanation}</p>
                 </div>
-                <Link href="/subjects">
+                <Link href="/dashboard">
                   <Button size="lg" className="mt-2">
                     <BookOpen className="mr-2 h-4 w-4" />
                     Exit to Study

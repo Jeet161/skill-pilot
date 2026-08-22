@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const COUNTS = [10, 20, 50, 100] as const;
+const COUNTS = [10, 15, 20] as const;
 const MODES = [
   { id: "BALANCED", label: "Balanced", blurb: "Broad coverage across all core concepts" },
   { id: "DEEP", label: "Deep Assessment", blurb: "Fewer concepts, tested far more thoroughly" },
@@ -58,14 +58,14 @@ function NewAssessmentInner() {
         </p>
 
         <div className="mt-10">
-          <h2 className="mb-3 text-sm font-medium text-white">Number of questions</h2>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <h2 className="mb-3 text-sm font-medium text-white text-center">Number of questions</h2>
+          <div className="flex justify-center gap-4">
             {COUNTS.map((c) => (
               <Card
                 key={c}
                 onClick={() => setCount(c)}
                 className={cn(
-                  "cursor-pointer p-4 text-center transition-all hover:border-primary/40",
+                  "cursor-pointer p-4 text-center transition-all hover:border-primary/40 w-full max-w-[180px]",
                   count === c && "border-primary/60 bg-primary/[0.06]"
                 )}
               >

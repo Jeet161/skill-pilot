@@ -372,16 +372,16 @@ export default function ResultPage({ params }: { params: { id: string } }) {
             variants={item}
             className="flex flex-col items-center gap-3 pt-2 sm:flex-row sm:justify-center"
           >
-            <Link href="/subjects">
+            <Link href="/dashboard?tab=discover">
               <Button size="lg" className="w-full sm:w-auto">
                 <Trophy className="mr-2 h-4 w-4" />
                 Try another subject
               </Button>
             </Link>
-            <Link href="/subjects">
+            <Link href="/dashboard">
               <Button size="lg" variant="outline" className="w-full sm:w-auto">
                 <ArrowRight className="mr-2 h-4 w-4" />
-                Back to subjects
+                Back to Dashboard
               </Button>
             </Link>
           </motion.div>

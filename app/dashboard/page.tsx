@@ -3,13 +3,14 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useSession, signOut } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Code2, Braces, FileCode2, Coffee, Database, GitBranch,
   Container, Server, Globe, Sparkles, BookOpen, Send, Loader2,
   ExternalLink, ChevronRight, MessageSquare, GraduationCap,
   ArrowLeft, CheckCircle2, RefreshCw, HelpCircle, ArrowRight,
-  TrendingUp, Award, Compass, BarChart2, BookMarked, User, Clock
+  TrendingUp, Award, Compass, BarChart2, BookMarked, User, Clock, LogOut
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -180,9 +181,21 @@ const getLevelTitle = (level: number) => {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const { data: session } = useSession();
   
   // Navigation Tabs state
   const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
+
+  // Read active tab from URL query param on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const tab = urlParams.get("tab");
+      if (tab === "dashboard" || tab === "assessments" || tab === "discover" || tab === "chat") {
+        setActiveTab(tab as ActiveTab);
+      }
+    }
+  }, []);
   
   // Core selected subject (for study details & chat tutor)
   const [activeSubject, setActiveSubject] = useState<Subject>(SUBJECTS[0]);
@@ -403,6 +416,32 @@ export default function DashboardPage() {
           </button>
         </nav>
 
+        {/* User profile & Sign Out */}
+        {session?.user && (
+          <div className="mt-auto border-t border-white/5 pt-4 space-y-3">
+            <div className="flex items-center gap-3 px-2">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-300">
+                <User className="h-4.5 w-4.5" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-white truncate">
+                  {session.user.name || session.user.email}
+                </p>
+                <p className="text-[10px] text-muted truncate">
+                  {session.user.email}
+                </p>
+              </div>
+            </div>
+            <button
+              id="btn-signout"
+              onClick={() => signOut({ callbackUrl: "/login" })}
+              className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-semibold text-red-400 hover:text-red-300 hover:bg-red-500/5 transition-all border border-transparent"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>Sign Out</span>
+            </button>
+          </div>
+        )}
 
       </aside>
 
@@ -435,7 +474,7 @@ export default function DashboardPage() {
                     Welcome back, Scholar.
                   </h1>
                   <p className="mt-1 text-sm text-muted max-w-lg">
-                    Your mind is sharp. Ready to conquer today's technical challenges?
+                    Your mind is sharp. Ready to conquer today&apos;s technical challenges?
                   </p>
                   
                   {/* Horizontal Progress bar for Mobile */}
@@ -497,7 +536,7 @@ export default function DashboardPage() {
                       Advanced Python: Comprehensions & Generators
                     </h3>
                     <p className="mt-2 text-xs text-muted leading-relaxed">
-                      Earn 2x XP by completing today's specialized core adaptive evaluation challenge.
+                      Earn 2x XP by completing today&apos;s specialized core adaptive evaluation challenge.
                     </p>
                   </div>
                   <Link href="/assessment/new?subject=Python" className="mt-6">
