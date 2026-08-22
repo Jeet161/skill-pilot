@@ -4,12 +4,10 @@ import {
   submitAnswer,
   ForbiddenError,
   AlreadyAnsweredError,
-  QuestionGenerationFailedError,
 } from "@/lib/assessment/orchestrator";
 import { getOrCreateUserId } from "@/lib/auth";
 import { checkRateLimit, tryAcquireLock, releaseLock } from "@/lib/assessment/rate-limit";
 import { isRecoverableAIError } from "@/lib/ai/router";
-import { toClientQuestion } from "@/lib/assessment/read-model";
 import { prisma } from "@/lib/db/prisma";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
@@ -45,19 +43,18 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       timeTakenMs: parsed.data.timeTakenMs,
     });
 
-    let nextQuestion = null;
+    let nextQuestion = result.nextQuestion;
     let intervention = null;
 
-    if (result.nextQuestionId) {
-      const q = await prisma.generatedQuestion.findUnique({ where: { id: result.nextQuestionId } });
-      if (q) nextQuestion = toClientQuestion(q);
-    }
-    if (result.interventionId) {
-      intervention = await prisma.intervention.findUnique({ where: { id: result.interventionId } });
+    if (result.failed) {
+      intervention = await prisma.intervention.findFirst({
+        where: { sessionId, questionId: parsed.data.questionId },
+      });
     }
 
     return NextResponse.json({
       completed: result.completed,
+      failed: result.failed,
       evaluation: {
         status: result.evaluation.status,
         correctness: result.evaluation.correctness,
@@ -78,7 +75,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       return NextResponse.json({ error: "This question was already answered." }, { status: 409 });
     }
     console.error("Failed to submit answer:", err);
-    if (err instanceof QuestionGenerationFailedError || isRecoverableAIError(err)) {
+    if (isRecoverableAIError(err)) {
       return NextResponse.json(
         { error: "The AI is having trouble generating your next question. Please retry." },
         { status: 503 }

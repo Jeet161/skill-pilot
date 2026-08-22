@@ -13,7 +13,7 @@ export async function getAssessmentState(sessionId: string, userId: string) {
 
   const currentQuestion = await prisma.generatedQuestion.findFirst({
     where: { sessionId, answer: null },
-    orderBy: { sequence: "desc" },
+    orderBy: { sequence: "asc" },
   });
 
   const latestIntervention = currentQuestion

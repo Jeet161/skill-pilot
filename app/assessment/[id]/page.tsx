@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
-import { Loader2, Sparkles, RefreshCw } from "lucide-react";
+import { Loader2, Sparkles, RefreshCw, BookOpen } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AssessmentProgress } from "@/components/assessment/AssessmentProgress";
@@ -139,12 +140,21 @@ export default function AssessmentPage({ params }: { params: { id: string } }) {
         correctAnswer: data.correctAnswer,
         explanation: data.explanation,
       });
-      setPendingNextQuestion(data.nextQuestion);
-      if (data.intervention) setIntervention(data.intervention);
+
+      // Wrong answer: show study intervention, session is completed
+      if (data.failed) {
+        setIntervention({
+          title: `Study "${state.currentQuestion.conceptName}" and try again`,
+          explanation: `You answered incorrectly. Don't worry — review the topic "${state.currentQuestion.conceptName}" and come back when you're ready. The correct answer was: ${data.correctAnswer}. ${data.explanation}`,
+        });
+        setPhase("intervention");
+        return;
+      }
 
       if (data.completed) {
         setPhase("completed");
       } else {
+        setPendingNextQuestion(data.nextQuestion);
         setPhase("feedback");
       }
     } catch (e: any) {
@@ -154,68 +164,28 @@ export default function AssessmentPage({ params }: { params: { id: string } }) {
   }
 
   async function proceedToNext() {
-    if (intervention) {
-      setIntervention(null);
+    if (!pendingNextQuestion) {
+      router.push("/subjects");
+      return;
     }
     
     setNextLoading(true);
-    // Poll the assessment state to see if the background question has finished generating
-    let attempts = 0;
-    const checkQuestionReady = async () => {
-      try {
-        const res = await fetch(`/api/assessment/${params.id}`);
-        const data = await res.json();
-        if (res.ok && data.currentQuestion && data.currentQuestion.id !== state?.currentQuestion?.id) {
-          setState(data);
-          setAnswer("");
-          setConfidence(null);
-          setFeedback(null);
-          setPendingNextQuestion(null);
-          setStartedAt(Date.now());
-          setPhase("question");
-          setNextLoading(false);
-        } else {
-          attempts++;
-          if (attempts < 40) {
-            setTimeout(checkQuestionReady, 3000);
-          } else {
-            // fallback: trigger explicit retry
-            const retryRes = await fetch(`/api/assessment/${params.id}/next-question`, { method: "POST" });
-            const retryData = await retryRes.json();
-            if (retryRes.ok && retryData.question) {
-              await loadState();
-            } else {
-              setError("The AI took too long to generate the next question. Please click retry.");
-              setPhase("error");
-            }
-            setNextLoading(false);
-          }
-        }
-      } catch (err) {
-        setNextLoading(false);
-        setError("Connection error while loading next question.");
-        setPhase("error");
-      }
-    };
-
-    if (pendingNextQuestion) {
-      // If it's somehow already here, just use it
-      setState({
-        ...state!,
-        currentQuestion: pendingNextQuestion,
-        session: { ...state!.session, askedCount: state!.session.askedCount },
-      });
-      setAnswer("");
-      setConfidence(null);
-      setFeedback(null);
-      setPendingNextQuestion(null);
-      setStartedAt(Date.now());
-      setPhase("question");
-      setNextLoading(false);
-      loadState();
-    } else {
-      await checkQuestionReady();
-    }
+    setState({
+      ...state!,
+      currentQuestion: pendingNextQuestion,
+      session: {
+        ...state!.session,
+        askedCount: state!.session.askedCount + 1,
+      },
+    });
+    setAnswer("");
+    setConfidence(null);
+    setFeedback(null);
+    setPendingNextQuestion(null);
+    setIntervention(null);
+    setStartedAt(Date.now());
+    setPhase("question");
+    setNextLoading(false);
   }
 
   async function retry() {
@@ -302,28 +272,36 @@ export default function AssessmentPage({ params }: { params: { id: string } }) {
             {phase === "feedback" && feedback && (
               <motion.div key="feedback" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <DiagnosisPanel {...feedback} />
-                {intervention ? (
-                  <div className="mt-4">
-                    <InterventionCard
-                      title={intervention.title}
-                      explanation={intervention.explanation}
-                      onContinue={proceedToNext}
-                    />
-                  </div>
-                ) : (
-                  <div className="mt-6 flex justify-end">
-                    <Button onClick={proceedToNext} disabled={nextLoading}>
-                      {nextLoading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Generating...
-                        </>
-                      ) : (
-                        "Next question"
-                      )}
-                    </Button>
-                  </div>
-                )}
+                <div className="mt-6 flex justify-end">
+                  <Button onClick={proceedToNext} disabled={nextLoading}>
+                    {nextLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Loading...
+                      </>
+                    ) : (
+                      "Next question"
+                    )}
+                  </Button>
+                </div>
+              </motion.div>
+            )}
+
+            {phase === "intervention" && intervention && (
+              <motion.div key="intervention" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex flex-col items-center gap-6 py-8 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent-amber/10 border border-accent-amber/30">
+                  <BookOpen className="h-6 w-6 text-accent-amber" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">{intervention.title}</h3>
+                  <p className="mt-2 max-w-md text-sm leading-relaxed text-muted">{intervention.explanation}</p>
+                </div>
+                <Link href="/subjects">
+                  <Button size="lg" className="mt-2">
+                    <BookOpen className="mr-2 h-4 w-4" />
+                    Exit to Study
+                  </Button>
+                </Link>
               </motion.div>
             )}
           </AnimatePresence>

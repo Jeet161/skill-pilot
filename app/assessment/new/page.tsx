@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const COUNTS = [20, 50, 100] as const;
+const COUNTS = [10, 20, 50, 100] as const;
 const MODES = [
   { id: "BALANCED", label: "Balanced", blurb: "Broad coverage across all core concepts" },
   { id: "DEEP", label: "Deep Assessment", blurb: "Fewer concepts, tested far more thoroughly" },
@@ -21,7 +21,7 @@ function NewAssessmentInner() {
   const params = useSearchParams();
   const subject = params.get("subject") ?? "Python";
 
-  const [count, setCount] = useState<number>(20);
+  const [count, setCount] = useState<number>(10);
   const [mode, setMode] = useState<string>("BALANCED");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +59,7 @@ function NewAssessmentInner() {
 
         <div className="mt-10">
           <h2 className="mb-3 text-sm font-medium text-white">Number of questions</h2>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {COUNTS.map((c) => (
               <Card
                 key={c}

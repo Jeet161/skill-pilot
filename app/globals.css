@@ -14,13 +14,13 @@ html {
 body {
   @apply bg-background text-white antialiased;
   background-image:
-    radial-gradient(circle at 15% 0%, rgba(110,231,255,0.06), transparent 40%),
+    radial-gradient(circle at 15% 0%, rgba(99,102,241,0.06), transparent 40%),
     radial-gradient(circle at 85% 20%, rgba(167,139,250,0.06), transparent 40%);
   background-attachment: fixed;
 }
 
 ::selection {
-  background: rgba(110,231,255,0.25);
+  background: rgba(99,102,241,0.25);
 }
 
 .bg-grid {

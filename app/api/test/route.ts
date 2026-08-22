@@ -5,7 +5,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   try {
     const subject = searchParams.get("subject") || "javascript";
-    const res = await planAssessmentBlueprint(subject, "COMPREHENSIVE", 10);
+    const res = await planAssessmentBlueprint(subject, "BALANCED", 10);
     return NextResponse.json(res);
   } catch (e: any) {
     let causeIssues = null;

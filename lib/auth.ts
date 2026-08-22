@@ -1,6 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { prisma } from "@/lib/db/prisma";
+import { prisma, withRetry } from "@/lib/db/prisma";
 
 const COOKIE_NAME = "skillpilot_uid";
 
@@ -20,13 +20,18 @@ export async function getOrCreateUserId(): Promise<string> {
   const existing = store.get(COOKIE_NAME)?.value;
 
   if (existing) {
-    const user = await prisma.user.findUnique({ where: { id: existing } });
+    // withRetry handles Neon free-tier cold start (wakes DB if suspended)
+    const user = await withRetry(() =>
+      prisma.user.findUnique({ where: { id: existing } })
+    );
     if (user) return user.id;
   }
 
-  const user = await prisma.user.create({
-    data: { email: `guest-${cryptoRandomId()}@skillpilot.local` },
-  });
+  const user = await withRetry(() =>
+    prisma.user.create({
+      data: { email: `guest-${cryptoRandomId()}@skillpilot.local` },
+    })
+  );
 
   store.set(COOKIE_NAME, user.id, {
     httpOnly: true,

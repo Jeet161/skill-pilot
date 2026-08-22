@@ -14,8 +14,8 @@ const config: Config = {
         surface2: "#101627",
         border: "rgba(255,255,255,0.08)",
         primary: {
-          DEFAULT: "#6ee7ff",
-          dim: "#3fb9d6",
+          DEFAULT: "#6366f1",
+          dim: "#4f46e5",
         },
         accent: {
           violet: "#a78bfa",
@@ -30,7 +30,7 @@ const config: Config = {
         mono: ["var(--font-mono)", "monospace"],
       },
       backgroundImage: {
-        "grid-fade": "radial-gradient(circle at 50% 0%, rgba(110,231,255,0.08), transparent 60%)",
+        "grid-fade": "radial-gradient(circle at 50% 0%, rgba(99,102,241,0.08), transparent 60%)",
       },
       keyframes: {
         pulseSlow: { "0%,100%": { opacity: "0.5" }, "50%": { opacity: "1" } },

@@ -22,9 +22,9 @@ const TIER_MODEL_MAP: Partial<Record<ModelTier, string>> = {
   vision:        process.env.GROQ_VISION_MODEL        ?? "openai/gpt-oss-120b",
 };
 
-// Route question, classifier, and reasoning (blueprint) tiers through Groq
+// Route all tiers through Groq (completely bypass Featherless)
 export function supportsGroqTier(tier: ModelTier): boolean {
-  return tier === "question" || tier === "classifier" || tier === "reasoning";
+  return true;
 }
 
 export interface GroqCallOptions {

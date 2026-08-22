@@ -5,28 +5,27 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
   Code2, Coffee, Braces, FileCode2, Database, GitBranch,
-  Boxes, Sigma, Cpu, Terminal, ArrowRight,
+  Container, Server, Globe, ArrowRight,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 /**
- * This list is app-level UI configuration only (icons/labels for the
- * picker). It contains no curriculum, no concepts, no questions — the
- * actual assessment structure for whichever subject is chosen is
- * discovered dynamically by Featherless AI at /assessment/new.
+ * Only subjects with confirmed QuizAPI tag support are listed here.
+ * Subjects without a matching QuizAPI tag (C++, Electronics, Data Structures,
+ * Algorithms) have been removed — users can still type them in the custom
+ * input and the AI fallback will generate questions for them.
  */
 const SUBJECTS = [
-  { id: "Python", icon: Code2, blurb: "Syntax, data structures, idioms" },
-  { id: "JavaScript", icon: Braces, blurb: "Runtime behavior, async, closures" },
+  { id: "Python",     icon: Code2,     blurb: "Syntax, data structures, idioms" },
+  { id: "JavaScript", icon: Braces,    blurb: "Runtime behavior, async, closures" },
   { id: "TypeScript", icon: FileCode2, blurb: "Types, generics, inference" },
-  { id: "Java", icon: Coffee, blurb: "OOP, collections, concurrency" },
-  { id: "C++", icon: Cpu, blurb: "Memory, templates, performance" },
-  { id: "SQL", icon: Database, blurb: "Queries, joins, schema design" },
-  { id: "Git", icon: GitBranch, blurb: "Branching, merging, workflows" },
-  { id: "Data Structures", icon: Boxes, blurb: "Trees, graphs, hashing" },
-  { id: "Algorithms", icon: Sigma, blurb: "Complexity, strategy, proofs" },
-  { id: "Electronics", icon: Terminal, blurb: "Circuits, signals, logic" },
+  { id: "Java",       icon: Coffee,    blurb: "OOP, collections, concurrency" },
+  { id: "SQL",        icon: Database,  blurb: "Queries, joins, schema design" },
+  { id: "Git",        icon: GitBranch, blurb: "Branching, merging, workflows" },
+  { id: "Docker",     icon: Container, blurb: "Images, containers, compose" },
+  { id: "Linux",      icon: Server,    blurb: "Shell, permissions, processes" },
+  { id: "PHP",        icon: Globe,     blurb: "Web scripting, forms, OOP" },
 ];
 
 export default function SubjectsPage() {
@@ -100,7 +99,7 @@ export default function SubjectsPage() {
           <button
             disabled={!selected && !custom.trim()}
             onClick={() => proceed(selected ?? custom.trim())}
-            className="inline-flex h-12 items-center gap-2 rounded-lg bg-primary px-7 text-sm font-medium text-background shadow-[0_0_20px_-4px_rgba(110,231,255,0.5)] transition-all disabled:pointer-events-none disabled:opacity-30 hover:bg-primary/90"
+            className="inline-flex h-12 items-center gap-2 rounded-lg bg-primary px-7 text-sm font-medium text-background shadow-[0_0_20px_-4px_rgba(99,102,241,0.5)] transition-all disabled:pointer-events-none disabled:opacity-30 hover:bg-primary/90"
           >
             Continue <ArrowRight className="h-4 w-4" />
           </button>

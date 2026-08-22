@@ -1,28 +1,16 @@
 import "server-only";
-import { prisma } from "@/lib/db/prisma";
+import { prisma, withRetry } from "@/lib/db/prisma";
+import { fetchQuestionsFromQuizAPI } from "./quizapi";
 import { planAssessmentBlueprint } from "@/lib/ai/assessment-planner";
 import { generateQuestion } from "@/lib/ai/question-generator";
-import { classifyAnswer } from "@/lib/ai/classifier";
-import { diagnoseAnswer } from "@/lib/ai/diagnostician";
-import { generateIntervention } from "@/lib/ai/intervention-generator";
-import { generateFinalReport } from "@/lib/ai/report-generator";
-import { decideNextStep } from "./adaptive-engine";
 import { estimateSkill, type Observation } from "./skill-estimator";
-import { fingerprintQuestion, similarity, DUPLICATE_SIMILARITY_THRESHOLD } from "./fingerprint";
-import { tryGetExecutionEvidence } from "./code-runner";
 import type {
-  AdaptiveDecision,
   AssessmentMode,
-  BlueprintConcept,
   EvaluationDTO,
-  LearnerStateSnapshot,
 } from "@/types/assessment";
-import type { ConceptCoverageInfo } from "./question-selector";
-
-const MAX_QUESTION_GEN_ATTEMPTS = 3;
 
 // ---------------------------------------------------------------------------
-// Session creation
+// Session creation — fetches all questions upfront from QuizAPI
 // ---------------------------------------------------------------------------
 
 export async function createAssessmentSession(params: {
@@ -41,36 +29,184 @@ export async function createAssessmentSession(params: {
     },
   });
 
-  // Fire-and-forget: blueprint + first question run in background.
-  // The client polls GET /api/assessment/[id] until currentQuestion appears.
+  // Fire-and-forget: fetch questions and store them all at once
   void (async () => {
     try {
-      const { blueprint } = await planAssessmentBlueprint(
-        params.subject,
-        params.mode,
-        params.targetCount
-      );
+      // Try QuizAPI first, fall back to AI generation
+      let questions;
+      let blueprintToPersist;
+      try {
+        questions = await fetchQuestionsFromQuizAPI(params.subject, params.targetCount);
+        if (questions.length === 0) throw new Error("No questions returned from QuizAPI");
+        console.log(`[QuizAPI] Fetched ${questions.length} questions for subject: ${params.subject}`);
 
-      await prisma.assessmentBlueprint.create({
+        // ── Top-up: if QuizAPI returned fewer than requested, fill the gap with AI ──
+        const shortfall = params.targetCount - questions.length;
+        if (shortfall > 0) {
+          console.log(`[QuizAPI] Short by ${shortfall} — topping up with AI generation`);
+          const { blueprint } = await planAssessmentBlueprint(params.subject, params.mode, shortfall);
+          const topupConcepts = blueprint.concepts.slice(0, shortfall);
+          const usedPrompts = questions.map(q => q.prompt);
+
+          const aiTopup = await Promise.all(
+            topupConcepts.map((concept) =>
+              generateQuestion({
+                subject: params.subject,
+                concept: concept as any,
+                decision: {
+                  action: "BASELINE",
+                  targetConceptId: concept.id,
+                  targetDifficulty: concept.approxDifficulty,
+                  reason: "AI top-up to reach target count",
+                  needsIntervention: false,
+                },
+                learnerState: {
+                  sessionId: session.id,
+                  subject: params.subject,
+                  askedCount: 0,
+                  targetCount: params.targetCount,
+                  estimates: {},
+                  recentAccuracy: 0,
+                  overallDifficulty: 0.5,
+                },
+                previousPromptsForConcept: [],
+                recentPromptsOverall: usedPrompts,
+              }).then(({ question }) => ({
+                conceptId: question.targetConcept,
+                conceptName: concept.name,
+                type: question.type,
+                difficulty: question.difficulty,
+                prompt: question.question,
+                options: question.options ?? [],
+                correctAnswer: question.correctAnswer,
+                explanation: question.explanation,
+              }))
+            )
+          );
+          questions = [...questions, ...aiTopup];
+          console.log(`[AI top-up] Added ${aiTopup.length}. Total: ${questions.length}`);
+        }
+
+        // Build blueprint from all questions (QuizAPI + AI top-up)
+        const conceptsMap = new Map<string, { id: string; name: string }>();
+        questions.forEach(q => conceptsMap.set(q.conceptId, { id: q.conceptId, name: q.conceptName }));
+        const concepts = Array.from(conceptsMap.values());
+
+        blueprintToPersist = {
+          subject: params.subject,
+          goal: `Live assessment for ${params.subject} — ${questions.length} questions ready.`,
+          concepts: concepts.map((c, i) => ({
+            id: c.id,
+            name: c.name,
+            description: `Questions about ${c.name} in ${params.subject}.`,
+            importance: 1.0 - i * 0.05,
+            prerequisites: i > 0 ? [concepts[i - 1].id] : [],
+            suggestedQuestionTypes: ["MULTIPLE_CHOICE"] as any[],
+            approxDifficulty: 0.5,
+          })),
+          coverageStrategy: "QuizAPI questions + AI top-up to hit target count.",
+        };
+      } catch (apiErr) {
+        console.warn(`[QuizAPI] Failed entirely — falling back to full AI generation:`, apiErr);
+
+        // Full AI fallback: blueprint + all questions in parallel
+        const { blueprint } = await planAssessmentBlueprint(params.subject, params.mode, params.targetCount);
+        blueprintToPersist = blueprint;
+
+        const conceptsToUse = blueprint.concepts.slice(0, params.targetCount);
+        const results = await Promise.all(
+          conceptsToUse.map((concept) =>
+            generateQuestion({
+              subject: params.subject,
+              concept: concept as any,
+              decision: {
+                action: "BASELINE",
+                targetConceptId: concept.id,
+                targetDifficulty: concept.approxDifficulty,
+                reason: "Initial baseline question",
+                needsIntervention: false,
+              },
+              learnerState: {
+                sessionId: session.id,
+                subject: params.subject,
+                askedCount: 0,
+                targetCount: params.targetCount,
+                estimates: {},
+                recentAccuracy: 0,
+                overallDifficulty: 0.5,
+              },
+              previousPromptsForConcept: [],
+              recentPromptsOverall: [],
+            }).then(({ question }) => ({
+              conceptId: question.targetConcept,
+              conceptName: concept.name,
+              type: question.type,
+              difficulty: question.difficulty,
+              prompt: question.question,
+              options: question.options ?? [],
+              correctAnswer: question.correctAnswer,
+              explanation: question.explanation,
+            }))
+          )
+        );
+
+        questions = results;
+      }
+
+      await withRetry(() => prisma.assessmentBlueprint.create({
         data: {
           sessionId: session.id,
-          subject: blueprint.subject,
-          goal: blueprint.goal,
-          raw: blueprint as any,
+          subject: blueprintToPersist.subject,
+          goal: blueprintToPersist.goal,
+          raw: blueprintToPersist as any,
         },
-      });
+      }));
 
-      await prisma.assessmentSession.update({
-        where: { id: session.id },
-        data: { status: "IN_PROGRESS" },
-      });
+      // Limit to targetCount
+      const toInsert = questions.slice(0, params.targetCount);
 
-      await generateAndPersistNextQuestion(session.id);
+      // --- PERSIST ALL QUESTIONS SYNCHRONOUSLY ---
+      // This prevents race conditions where answering the first question too quickly
+      // completes the session prematurely because Q2 has not been persisted yet.
+      if (toInsert.length > 0) {
+        await withRetry(() => Promise.all(
+          toInsert.map((q, idx) =>
+            prisma.generatedQuestion.create({
+              data: {
+                sessionId: session.id,
+                sequence: idx + 1,
+                conceptId: q.conceptId,
+                conceptName: q.conceptName,
+                type: q.type,
+                purpose: "BASELINE",
+                difficulty: q.difficulty,
+                prompt: q.prompt,
+                options: q.options,
+                correctAnswer: q.correctAnswer,
+                explanation: q.explanation,
+                fingerprint: `${session.id}-q${idx + 1}`,
+                rationale: `Question ${idx + 1} of ${toInsert.length}`,
+              },
+            })
+          )
+        ));
+
+        // All questions are database-persisted. Mark session as active.
+        await withRetry(() => prisma.assessmentSession.update({
+          where: { id: session.id },
+          data: {
+            status: "AWAITING_ANSWER",
+            askedCount: 1,
+            lastAiCallAt: new Date(),
+          },
+        }));
+      }
+
     } catch (err) {
-      console.error("Background session build failed:", err);
+      console.error("Session build failed:", err);
       await prisma.assessmentSession
         .update({ where: { id: session.id }, data: { status: "FAILED" } })
-        .catch(() => {});
+        .catch(() => { });
     }
   })();
 
@@ -78,227 +214,7 @@ export async function createAssessmentSession(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function getBlueprintConcepts(sessionId: string): Promise<BlueprintConcept[]> {
-  const bp = await prisma.assessmentBlueprint.findUnique({ where: { sessionId } });
-  if (!bp) throw new Error("Blueprint not found for session");
-  return (bp.raw as any).concepts as BlueprintConcept[];
-}
-
-async function buildCoverageMap(sessionId: string): Promise<Map<string, ConceptCoverageInfo>> {
-  const estimates = await prisma.skillEstimate.findMany({ where: { sessionId } });
-  const map = new Map<string, ConceptCoverageInfo>();
-  for (const e of estimates) {
-    map.set(e.conceptId, {
-      conceptId: e.conceptId,
-      evidenceCount: e.evidenceCount,
-      proficiency: e.proficiency,
-      evidenceConfidence: e.evidenceConfidence,
-      transferVerified: e.transferVerified,
-    });
-  }
-  return map;
-}
-
-async function buildLearnerStateSnapshot(sessionId: string): Promise<LearnerStateSnapshot> {
-  const session = await prisma.assessmentSession.findUniqueOrThrow({ where: { id: sessionId } });
-  const estimates = await prisma.skillEstimate.findMany({ where: { sessionId } });
-  const recentAnswers = await prisma.aIEvaluation.findMany({
-    where: { question: { sessionId } },
-    orderBy: { createdAt: "desc" },
-    take: 5,
-  });
-
-  const recentAccuracy =
-    recentAnswers.length > 0
-      ? recentAnswers.reduce((sum: number, e: any) => sum + e.correctness, 0) / recentAnswers.length
-      : 0.5;
-
-  const estimatesRecord: LearnerStateSnapshot["estimates"] = {};
-  let difficultySum = 0;
-  estimates.forEach((e: any) => {
-    estimatesRecord[e.conceptId] = {
-      proficiency: e.proficiency,
-      evidenceConfidence: e.evidenceConfidence,
-      evidenceCount: e.evidenceCount,
-      state: e.state,
-      difficultyCeiling: e.difficultyCeiling,
-      transferVerified: e.transferVerified,
-    };
-    difficultySum += e.difficultyCeiling;
-  });
-
-  return {
-    sessionId,
-    subject: session.subject,
-    askedCount: session.askedCount,
-    targetCount: session.targetCount,
-    estimates: estimatesRecord,
-    recentAccuracy,
-    overallDifficulty: estimates.length ? difficultySum / estimates.length : 0.4,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Question generation (one at a time, with duplicate + validation retries)
-// ---------------------------------------------------------------------------
-
-async function generateAndPersistNextQuestion(
-  sessionId: string,
-  decisionOverride?: AdaptiveDecision
-): Promise<{ questionId: string }> {
-  const session = await prisma.assessmentSession.findUniqueOrThrow({ where: { id: sessionId } });
-  const concepts = await getBlueprintConcepts(sessionId);
-  const coverage = await buildCoverageMap(sessionId);
-  const learnerState = await buildLearnerStateSnapshot(sessionId);
-
-  let decision: AdaptiveDecision;
-  if (decisionOverride) {
-    decision = decisionOverride;
-  } else {
-    // First question of the session: baseline on the highest-importance concept.
-    const first = [...concepts].sort((a, b) => b.importance - a.importance)[0];
-    decision = {
-      action: "BASELINE",
-      targetConceptId: first.id,
-      targetDifficulty: first.approxDifficulty ?? 0.4,
-      reason: "Starting with a foundational concept to establish a baseline.",
-      needsIntervention: false,
-    };
-  }
-
-  const concept = concepts.find((c) => c.id === decision.targetConceptId) ?? concepts[0];
-
-  const previousQuestions = await prisma.generatedQuestion.findMany({
-    where: { sessionId },
-    orderBy: { sequence: "desc" },
-    take: 20,
-  });
-  const previousPromptsForConcept = previousQuestions
-    .filter((q: any) => q.conceptId === concept.id)
-    .map((q: any) => q.prompt);
-  const recentPromptsOverall = previousQuestions.map((q: any) => q.prompt);
-  const existingFingerprints = new Set(previousQuestions.map((q: any) => q.fingerprint));
-
-  let lastError: unknown = null;
-
-  for (let attempt = 1; attempt <= MAX_QUESTION_GEN_ATTEMPTS; attempt++) {
-    try {
-      const { question, modelUsed } = await generateQuestion({
-        subject: session.subject,
-        concept,
-        decision,
-        learnerState,
-        previousPromptsForConcept,
-        recentPromptsOverall,
-      });
-
-      const fingerprint = fingerprintQuestion(question.question);
-
-      const isDuplicate =
-        existingFingerprints.has(fingerprint) ||
-        recentPromptsOverall.some((p: string) => similarity(p, question.question) >= DUPLICATE_SIMILARITY_THRESHOLD);
-
-      if (isDuplicate) {
-        lastError = new Error("Duplicate question generated");
-        continue; // retry
-      }
-
-      const created = await prisma.generatedQuestion.create({
-        data: {
-          sessionId,
-          sequence: session.askedCount + 1,
-          conceptId: concept.id,
-          conceptName: concept.name,
-          type: question.type,
-          purpose: decision.action,
-          difficulty: question.difficulty,
-          prompt: question.question,
-          options: question.options ?? undefined,
-          correctAnswer: question.correctAnswer,
-          explanation: question.explanation,
-          fingerprint,
-          rationale: question.rationale ?? decision.reason,
-        },
-      });
-
-      await prisma.assessmentSession.update({
-        where: { id: sessionId },
-        data: {
-          askedCount: { increment: 1 },
-          status: "AWAITING_ANSWER",
-          lastAiCallAt: new Date(),
-        },
-      });
-
-      return { questionId: created.id };
-    } catch (err) {
-      console.error(`[QuestionGen] attempt ${attempt}/${MAX_QUESTION_GEN_ATTEMPTS} failed:`, err);
-      lastError = err;
-    }
-  }
-
-  await prisma.assessmentSession.update({
-    where: { id: sessionId },
-    data: { status: "FAILED" },
-  });
-  throw new QuestionGenerationFailedError(
-    `Failed to generate a valid, non-duplicate question after ${MAX_QUESTION_GEN_ATTEMPTS} attempts`,
-    lastError
-  );
-}
-
-/**
- * Used by the /next-question retry endpoint when question generation
- * previously failed and the session has no current pending question.
- */
-export async function retryGenerateQuestion(sessionId: string, userId: string) {
-  const session = await prisma.assessmentSession.findUniqueOrThrow({ where: { id: sessionId } });
-  if (session.userId !== userId) throw new ForbiddenError("Access denied.");
-
-  const pending = await prisma.generatedQuestion.findFirst({
-    where: { sessionId, answer: null },
-  });
-  if (pending) return { questionId: pending.id };
-
-  if (session.status === "COMPLETED" || session.status === "ABANDONED") {
-    throw new Error("Assessment is no longer active.");
-  }
-
-  await prisma.assessmentSession.update({ where: { id: sessionId }, data: { status: "IN_PROGRESS" } });
-
-  const concepts = await getBlueprintConcepts(sessionId);
-  const coverage = await buildCoverageMap(sessionId);
-
-  if (session.askedCount === 0) {
-    return generateAndPersistNextQuestion(sessionId);
-  }
-
-  const leastEvidence = [...concepts].sort(
-    (a, b) => (coverage.get(a.id)?.evidenceCount ?? 0) - (coverage.get(b.id)?.evidenceCount ?? 0)
-  )[0];
-
-  return generateAndPersistNextQuestion(sessionId, {
-    action: coverage.has(leastEvidence.id) ? "RELATED_CONCEPT" : "NEW_CONCEPT",
-    targetConceptId: leastEvidence.id,
-    targetDifficulty: leastEvidence.approxDifficulty ?? 0.45,
-    reason: "Resuming the assessment after a temporary issue.",
-    needsIntervention: false,
-  });
-}
-
-export class QuestionGenerationFailedError extends Error {
-  cause?: unknown;
-  constructor(message: string, cause?: unknown) {
-    super(message);
-    this.cause = cause;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Answer submission -> evaluation -> learner model update -> next step
+// Answer submission — instant string match, background analytics
 // ---------------------------------------------------------------------------
 
 export async function submitAnswer(params: {
@@ -309,17 +225,18 @@ export async function submitAnswer(params: {
   confidence?: number;
   timeTakenMs?: number;
 }) {
-  const session = await prisma.assessmentSession.findUniqueOrThrow({
-    where: { id: params.sessionId },
-  });
+  // ── 1. Load session + question (essential, needed for auth + eval) ──────
+  const [session, question] = await Promise.all([
+    prisma.assessmentSession.findUniqueOrThrow({ where: { id: params.sessionId } }),
+    prisma.generatedQuestion.findUniqueOrThrow({
+      where: { id: params.questionId },
+      include: { answer: true },
+    }),
+  ]);
+
   if (session.userId !== params.userId) {
     throw new ForbiddenError("You do not have access to this assessment.");
   }
-
-  const question = await prisma.generatedQuestion.findUniqueOrThrow({
-    where: { id: params.questionId },
-    include: { answer: true },
-  });
   if (question.sessionId !== params.sessionId) {
     throw new ForbiddenError("Question does not belong to this assessment.");
   }
@@ -327,218 +244,204 @@ export async function submitAnswer(params: {
     throw new AlreadyAnsweredError("This question has already been answered.");
   }
 
-  await prisma.answer.create({
-    data: {
-      questionId: question.id,
-      rawAnswer: params.rawAnswer,
-      confidence: params.confidence,
-      timeTakenMs: params.timeTakenMs,
-    },
-  });
-
-  // Optional: code execution evidence for programming question types
-  let executionEvidence: string | null = null;
-  if (["CODE_OUTPUT", "CODE_WRITING", "DEBUGGING"].includes(question.type)) {
-    executionEvidence = await tryGetExecutionEvidence({
-      language: guessLanguage(session.subject),
-      code: params.rawAnswer,
-    });
-  }
-
-  const { classification } = await classifyAnswer({
-    question: question.prompt,
-    correctAnswer: question.correctAnswer,
-    learnerAnswer: params.rawAnswer,
-    questionType: question.type,
-  });
-
-  const { evaluation, modelUsed, escalated } = await diagnoseAnswer({
-    subject: session.subject,
-    conceptName: question.conceptName,
-    question: question.prompt,
-    correctAnswer: question.correctAnswer,
-    explanation: question.explanation,
-    learnerAnswer: params.rawAnswer,
-    questionType: question.type,
-    priorClassification: classification,
-    codeExecutionEvidence: executionEvidence,
-  });
-
-  await prisma.aIEvaluation.create({
-    data: {
-      questionId: question.id,
-      status: evaluation.status,
-      correctness: evaluation.correctness,
-      confidence: evaluation.confidence,
-      errorType: evaluation.errorType,
-      misconception: evaluation.misconception,
-      understood: evaluation.understood,
-      missing: evaluation.missing,
-      recommendedAction: evaluation.recommendedAction,
-      modelUsed: escalated ? `${modelUsed} (escalated)` : modelUsed,
-    },
-  });
-
-  // Update rolling skill observations + estimate for this concept
-  await prisma.skillObservation.create({
-    data: {
-      sessionId: session.id,
-      conceptId: question.conceptId,
-      conceptName: question.conceptName,
-      evidenceType: mapPurposeToEvidenceType(question.purpose),
-      correctness: evaluation.correctness,
-      difficulty: question.difficulty,
-    },
-  });
-
-  const observations = await prisma.skillObservation.findMany({
-    where: { sessionId: session.id, conceptId: question.conceptId },
-    orderBy: { createdAt: "asc" },
-  });
-  const rolled = estimateSkill(
-    observations.map((o: any): Observation => ({
-      correctness: o.correctness,
-      difficulty: o.difficulty,
-      evidenceType: o.evidenceType,
-    }))
-  );
-
-  await prisma.skillEstimate.upsert({
-    where: { sessionId_conceptId: { sessionId: session.id, conceptId: question.conceptId } },
-    create: {
-      sessionId: session.id,
-      conceptId: question.conceptId,
-      conceptName: question.conceptName,
-      proficiency: rolled.proficiency,
-      evidenceConfidence: rolled.evidenceConfidence,
-      evidenceCount: rolled.evidenceCount,
-      state: rolled.state,
-      difficultyCeiling: rolled.difficultyCeiling,
-      transferVerified: rolled.transferVerified,
-    },
-    update: {
-      proficiency: rolled.proficiency,
-      evidenceConfidence: rolled.evidenceConfidence,
-      evidenceCount: rolled.evidenceCount,
-      state: rolled.state,
-      difficultyCeiling: rolled.difficultyCeiling,
-      transferVerified: rolled.transferVerified,
-    },
-  });
-
-  // Generate a targeted intervention if the diagnosis calls for it
-  let interventionId: string | null = null;
-  const needsInterventionFromEval =
-    evaluation.status === "INCORRECT" || evaluation.errorType === "CONCEPTUAL_GAP";
-  if (needsInterventionFromEval) {
-    const { intervention } = await generateIntervention({
-      subject: session.subject,
-      conceptName: question.conceptName,
-      misconception: evaluation.misconception,
-      missing: evaluation.missing,
-      learnerAnswer: params.rawAnswer,
-      question: question.prompt,
-      explanation: question.explanation,
-    });
-    const created = await prisma.intervention.create({
-      data: {
-        sessionId: session.id,
-        questionId: question.id,
-        conceptId: question.conceptId,
-        conceptName: question.conceptName,
-        title: intervention.title,
-        explanation: intervention.explanation,
-      },
-    });
-    interventionId = created.id;
-  }
+  // ── 2. Instant string-match evaluation ──────────────────────────────────
+  const isCorrect =
+    params.rawAnswer.trim().toLowerCase() ===
+    question.correctAnswer.trim().toLowerCase();
+  const correctness = isCorrect ? 1.0 : 0.0;
 
   const evalDTO: EvaluationDTO = {
-    status: evaluation.status,
-    correctness: evaluation.correctness,
-    confidence: evaluation.confidence,
-    errorType: evaluation.errorType,
-    misconception: evaluation.misconception,
-    understood: evaluation.understood,
-    missing: evaluation.missing,
-    recommendedAction: evaluation.recommendedAction,
-    explanationForLearner: evaluation.explanationForLearner,
+    status: isCorrect ? "CORRECT" : "INCORRECT",
+    correctness,
+    confidence: 1.0,
+    errorType: isCorrect ? "NONE" : "CONCEPTUAL_GAP",
+    misconception: null,
+    understood: [],
+    missing: [],
+    recommendedAction: isCorrect ? "NEW_CONCEPT" : "REMEDIAL_TEST",
+    explanationForLearner: isCorrect
+      ? undefined
+      : `That's not right. The correct answer is: ${question.correctAnswer}. ${question.explanation}`,
   };
 
-  // Decide what happens next
-  const concepts = await getBlueprintConcepts(session.id);
-  const coverage = await buildCoverageMap(session.id);
-  const decision = decideNextStep({
-    concepts,
-    currentConceptId: question.conceptId,
-    currentPurpose: question.purpose,
-    currentDifficulty: question.difficulty,
-    evaluation: evalDTO,
-    coverage,
-    askedCount: session.askedCount,
-    targetCount: session.targetCount,
+  // ── 3. Essential reads and state updates (must block to prevent races) ─
+  const nextQuestion = await prisma.generatedQuestion.findFirst({
+    where: { sessionId: session.id, answer: null, id: { not: question.id } },
+    orderBy: { sequence: "asc" },
   });
 
-  const isComplete = session.askedCount >= session.targetCount;
+  const isCompleted = !nextQuestion;
 
-  if (isComplete) {
-    await prisma.assessmentSession.update({
-      where: { id: session.id },
-      data: { status: "COMPLETED", completedAt: new Date() },
-    });
+  await Promise.all([
+    // Record the raw answer (fast write, needed for idempotency guard)
+    prisma.answer.create({
+      data: {
+        questionId: question.id,
+        rawAnswer: params.rawAnswer,
+        confidence: params.confidence,
+        timeTakenMs: params.timeTakenMs,
+      },
+    }),
+    // Update session progress counter / completion status immediately (blocks response)
+    isCompleted
+      ? prisma.assessmentSession.update({
+        where: { id: session.id },
+        data: { status: "COMPLETED", completedAt: new Date() },
+      })
+      : prisma.assessmentSession.update({
+        where: { id: session.id },
+        data: { askedCount: { increment: 1 } },
+      }),
+  ]);
+
+  // ── 4. Fire-and-forget: all analytics/bookkeeping runs in background ────
+  //    The user already has their result — none of this blocks the response.
+  void (async () => {
+    try {
+      await Promise.all([
+        // Log AI evaluation record
+        prisma.aIEvaluation.create({
+          data: {
+            questionId: question.id,
+            status: isCorrect ? "CORRECT" : "INCORRECT",
+            correctness,
+            confidence: 1.0,
+            errorType: isCorrect ? "NONE" : "CONCEPTUAL_GAP",
+            misconception: null,
+            understood: [],
+            missing: [],
+            recommendedAction: isCorrect ? "NEW_CONCEPT" : "REMEDIAL_TEST",
+            modelUsed: "static-evaluator",
+          },
+        }),
+        // Log skill observation
+        prisma.skillObservation.create({
+          data: {
+            sessionId: session.id,
+            conceptId: question.conceptId,
+            conceptName: question.conceptName,
+            evidenceType: "baseline",
+            correctness,
+            difficulty: question.difficulty,
+          },
+        }),
+        // Log intervention on wrong answer
+        !isCorrect
+          ? prisma.intervention.create({
+            data: {
+              sessionId: session.id,
+              questionId: question.id,
+              conceptId: question.conceptId,
+              conceptName: question.conceptName,
+              title: `Study "${question.conceptName}"`,
+              explanation: `You answered incorrectly. The correct answer was: ${question.correctAnswer}. ${question.explanation}`,
+            },
+          })
+          : Promise.resolve(),
+      ]);
+
+
+      // Skill estimate update depends on the observation being written first
+      const observations = await prisma.skillObservation.findMany({
+        where: { sessionId: session.id, conceptId: question.conceptId },
+        orderBy: { createdAt: "asc" },
+      });
+      const rolled = estimateSkill(
+        observations.map((o: any): Observation => ({
+          correctness: o.correctness,
+          difficulty: o.difficulty,
+          evidenceType: o.evidenceType,
+        }))
+      );
+      await prisma.skillEstimate.upsert({
+        where: { sessionId_conceptId: { sessionId: session.id, conceptId: question.conceptId } },
+        create: {
+          sessionId: session.id,
+          conceptId: question.conceptId,
+          conceptName: question.conceptName,
+          proficiency: rolled.proficiency,
+          evidenceConfidence: rolled.evidenceConfidence,
+          evidenceCount: rolled.evidenceCount,
+          state: rolled.state,
+          difficultyCeiling: rolled.difficultyCeiling,
+          transferVerified: rolled.transferVerified,
+        },
+        update: {
+          proficiency: rolled.proficiency,
+          evidenceConfidence: rolled.evidenceConfidence,
+          evidenceCount: rolled.evidenceCount,
+          state: rolled.state,
+          difficultyCeiling: rolled.difficultyCeiling,
+          transferVerified: rolled.transferVerified,
+        },
+      });
+    } catch (bgErr) {
+      console.error("[submitAnswer background] analytics write failed:", bgErr);
+    }
+  })();
+
+  // ── 5. Return result immediately ─────────────────────────────────────────
+  if (isCompleted) {
     return {
       completed: true,
+      failed: false,
       evaluation: evalDTO,
-      interventionId,
-      nextQuestionId: null,
+      nextQuestion: null,
       correctAnswer: question.correctAnswer,
       explanation: question.explanation,
     };
   }
 
-  // Fire-and-forget: next question generates while user reads feedback.
-  // The client polls GET /api/assessment/[id] until currentQuestion updates.
-  void generateAndPersistNextQuestion(session.id, decision).catch((err) => {
-    console.error("Background next-question generation failed:", err);
-    prisma.assessmentSession
-      .update({ where: { id: session.id }, data: { status: "IN_PROGRESS" } })
-      .catch(() => {});
-  });
-
   return {
     completed: false,
+    failed: false,
     evaluation: evalDTO,
-    interventionId,
-    nextQuestionId: null, // generated in background; client polls for it
+    nextQuestion: {
+      id: nextQuestion!.id,
+      sequence: nextQuestion!.sequence,
+      conceptId: nextQuestion!.conceptId,
+      conceptName: nextQuestion!.conceptName,
+      type: nextQuestion.type,
+      purpose: nextQuestion.purpose,
+      difficulty: nextQuestion.difficulty,
+      prompt: nextQuestion.prompt,
+      options: (nextQuestion.options as string[] | null) ?? null,
+      rationale: nextQuestion.rationale,
+    },
     correctAnswer: question.correctAnswer,
     explanation: question.explanation,
   };
 }
 
-function mapPurposeToEvidenceType(purpose: string): string {
-  if (purpose === "TRANSFER_TEST") return "transfer";
-  if (purpose === "REMEDIAL_TEST" || purpose === "SAME_CONCEPT_EASIER") return "remedial";
-  if (purpose === "PREREQUISITE_TEST") return "prerequisite";
-  return "baseline";
-}
-
-function guessLanguage(subject: string): "python" | "javascript" | "typescript" | "java" | "cpp" | "sql" {
-  const s = subject.toLowerCase();
-  if (s.includes("python")) return "python";
-  if (s.includes("typescript")) return "typescript";
-  if (s.includes("javascript") || s.includes("js")) return "javascript";
-  if (s.includes("java") && !s.includes("javascript")) return "java";
-  if (s.includes("c++") || s.includes("cpp")) return "cpp";
-  if (s.includes("sql")) return "sql";
-  return "python";
-}
-
-export class ForbiddenError extends Error {}
-export class AlreadyAnsweredError extends Error {}
-export class NotFoundError extends Error {}
+export class ForbiddenError extends Error { }
+export class AlreadyAnsweredError extends Error { }
+export class NotFoundError extends Error { }
 
 // ---------------------------------------------------------------------------
-// Final report generation
+// Retry for FAILED sessions
+// ---------------------------------------------------------------------------
+
+export async function retryGenerateQuestion(sessionId: string, userId: string) {
+  const session = await prisma.assessmentSession.findUniqueOrThrow({ where: { id: sessionId } });
+  if (session.userId !== userId) throw new ForbiddenError("Access denied.");
+
+  const pending = await prisma.generatedQuestion.findFirst({
+    where: { sessionId, answer: null },
+    orderBy: { sequence: "asc" },
+  });
+  if (pending) {
+    await prisma.assessmentSession.update({
+      where: { id: sessionId },
+      data: { status: "AWAITING_ANSWER" },
+    });
+    return { questionId: pending.id };
+  }
+
+  throw new Error("No pending questions found. The session may be complete.");
+}
+
+// ---------------------------------------------------------------------------
+// Final report — no AI, pure data
 // ---------------------------------------------------------------------------
 
 export async function getOrCreateFinalReport(sessionId: string, userId: string) {
@@ -548,82 +451,63 @@ export async function getOrCreateFinalReport(sessionId: string, userId: string) 
   const existing = await prisma.assessmentResult.findUnique({ where: { sessionId } });
   if (existing) return existing;
 
-  if (session.status !== "COMPLETED") {
+  const questions = await prisma.generatedQuestion.findMany({
+    where: { sessionId },
+    include: { evaluation: true, answer: true },
+    orderBy: { sequence: "asc" },
+  });
+
+  const allAnswered = questions.length > 0 && questions.every((q: any) => q.answer);
+
+  if (session.status !== "COMPLETED" && !allAnswered) {
     throw new Error("Assessment is not complete yet.");
   }
 
-  const blueprint = await prisma.assessmentBlueprint.findUniqueOrThrow({ where: { sessionId } });
+  if (session.status !== "COMPLETED" && allAnswered) {
+    await prisma.assessmentSession.update({
+      where: { id: sessionId },
+      data: { status: "COMPLETED", completedAt: new Date() },
+    });
+  }
+
   const estimates = await prisma.skillEstimate.findMany({ where: { sessionId } });
-  const questions = await prisma.generatedQuestion.findMany({
-    where: { sessionId },
-    include: { evaluation: true },
-    orderBy: { sequence: "asc" },
-  });
-  const interventions = await prisma.intervention.findMany({ where: { sessionId } });
 
   const evaluated = questions.filter((q: any) => q.evaluation);
-  const third = Math.max(1, Math.floor(evaluated.length / 3));
-  const early = evaluated.slice(0, third);
-  const late = evaluated.slice(-third);
-  const earlyAccuracy = avg(early.map((q: any) => q.evaluation!.correctness));
-  const lateAccuracy = avg(late.map((q: any) => q.evaluation!.correctness));
+  const totalCorrect = evaluated.filter((q: any) => q.evaluation!.correctness >= 1.0).length;
+  const passed = totalCorrect === evaluated.length && evaluated.length > 0;
 
-  const transferQuestions = evaluated.filter((q: any) => q.purpose === "TRANSFER_TEST");
-  const transferSuccessRate = transferQuestions.length
-    ? avg(transferQuestions.map((q: any) => q.evaluation!.correctness))
-    : 0;
-
-  const { report, modelUsed } = await generateFinalReport({
-    subject: session.subject,
-    goal: blueprint.goal,
-    totalQuestions: evaluated.length,
-    skillEstimates: estimates.map((e: any) => ({
-      conceptName: e.conceptName,
-      proficiency: e.proficiency,
-      evidenceConfidence: e.evidenceConfidence,
-      state: e.state,
-      transferVerified: e.transferVerified,
-    })),
-    misconceptionsObserved: Array.from(
-      new Set(
-        evaluated
-          .map((q: any) => q.evaluation!.misconception)
-          .filter((m: string | null): m is string => Boolean(m))
-      )
-    ),
-    difficultyProgression: evaluated.map((q: any) => q.difficulty),
-    transferSuccessRate,
-    earlyAccuracy,
-    lateAccuracy,
-  });
-
-  const overallProficiency = avg(estimates.map((e: any) => e.proficiency));
+  const overallProficiency = evaluated.length > 0 ? totalCorrect / evaluated.length : 0;
   const overallConfidence = avg(estimates.map((e: any) => e.evidenceConfidence));
   const difficultyCeiling = Math.max(0, ...estimates.map((e: any) => e.difficultyCeiling));
 
-  const result = await prisma.assessmentResult.create({
+  const strongAreas = estimates.filter((e: any) => e.proficiency >= 0.7).map((e: any) => e.conceptName);
+  const weakAreas = estimates.filter((e: any) => e.proficiency < 0.4).map((e: any) => e.conceptName);
+  const developingAreas = estimates.filter((e: any) => e.proficiency >= 0.4 && e.proficiency < 0.7).map((e: any) => e.conceptName);
+
+  const summary = passed
+    ? `Congratulations! You answered all ${evaluated.length} question(s) correctly and demonstrated solid understanding of ${session.subject}.`
+    : `You answered ${totalCorrect} out of ${evaluated.length} question(s) correctly. Review the weak areas below and try again.`;
+
+  return prisma.assessmentResult.create({
     data: {
       sessionId,
       overallProficiency,
       overallConfidence,
-      strongAreas: report.strongAreas,
-      developingAreas: report.developingAreas,
-      weakAreas: report.weakAreas,
-      uncertainAreas: report.uncertainAreas,
-      misconceptions: report.misconceptions,
+      strongAreas,
+      developingAreas,
+      weakAreas,
+      uncertainAreas: [],
+      misconceptions: [],
       difficultyCeiling,
-      transferPerformance: transferSuccessRate,
-      improvementDuringAssessment: lateAccuracy - earlyAccuracy,
-      recommendedNextAreas: report.recommendedNextAreas,
-      remainingUncertainties: report.remainingUncertainties,
-      summary: report.summary,
+      transferPerformance: 0,
+      improvementDuringAssessment: 0,
+      recommendedNextAreas: weakAreas.length > 0
+        ? weakAreas.map((a: string) => `Study and review: ${a}`)
+        : [`Explore more advanced topics in ${session.subject}`],
+      remainingUncertainties: [],
+      summary,
     },
   });
-
-  void interventions; // reserved for future richer reporting
-  void modelUsed;
-
-  return result;
 }
 
 function avg(nums: number[]): number {

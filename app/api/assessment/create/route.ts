@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CreateAssessmentSchema } from "@/lib/validation/assessment";
-import { createAssessmentSession, QuestionGenerationFailedError } from "@/lib/assessment/orchestrator";
+import { createAssessmentSession } from "@/lib/assessment/orchestrator";
 import { getOrCreateUserId } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/assessment/rate-limit";
 import { isRecoverableAIError } from "@/lib/ai/router";
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ sessionId }, { status: 201 });
   } catch (err) {
     console.error("Failed to create assessment:", err);
-    if (err instanceof QuestionGenerationFailedError || isRecoverableAIError(err)) {
+    if (isRecoverableAIError(err)) {
       return NextResponse.json(
         { error: "The AI was unable to generate a valid assessment right now. Please try again." },
         { status: 503 }
