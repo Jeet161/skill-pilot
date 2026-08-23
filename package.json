@@ -2,6 +2,8 @@
   "name": "skillpilot",
   "version": "1.0.0",
   "private": true,
+  "author": "Jeet Dey & Kabigyan Deb",
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
@@ -48,5 +50,11 @@
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.6.3"
+  },
+  "allowScripts": {
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "prisma@5.22.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }
