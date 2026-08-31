@@ -73,7 +73,7 @@ Unlike traditional platforms reliant on static, pre-written question banks, Skil
 5. **Start the Development Server**:
    ```bash
    npm run dev
-   ```
+   ```..
 
 6. Open [http://localhost:3000](http://localhost:3000) in your browser.
 
