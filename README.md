@@ -81,4 +81,4 @@ Unlike traditional platforms reliant on static, pre-written question banks, Skil
 
 Created by **Jeet Dey** and **Kabigyan Deb**.
 
-This project is open-source under the [MIT License](LICENSE).
+This project is open-source under the [MIT License](LICENSE)....
